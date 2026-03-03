@@ -1,0 +1,672 @@
+<!-- Patched comment test
+  IoU Interactive Demo
+  
+  This page provides an interactive demonstration of the Intersection over Union (IoU)
+  metric for different bounding box parameterizations. Users can select from
+  axis‑aligned bounding boxes (HBB), oriented bounding boxes (5 DoF),
+  parallelogram bounding boxes defined via centre offsets (6 DoF) and general
+  quadrilaterals (8 DoF). A ground‑truth box and a prediction box can be drawn
+  independently. The intersection area is shaded and the IoU value is computed
+  automatically. The implementation relies only on vanilla JavaScript, HTML
+  and CSS; no external dependencies are required. All polygon computations use
+  the Sutherland–Hodgman algorithm and a simple shoelace formula for area
+  calculation.  
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IoU Interactive Demo</title>
+  <style>
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background: #fafafa;
+      color: #333;
+    }
+    h1 {
+      margin-top: 20px;
+      margin-bottom: 10px;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    select, button {
+      padding: 8px 12px;
+      font-size: 14px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    button {
+      cursor: pointer;
+      background-color: #007acc;
+      color: white;
+    }
+    button:disabled {
+      background-color: #999;
+      cursor: not-allowed;
+    }
+    #canvasContainer {
+      position: relative;
+      border: 1px solid #ccc;
+      background: #ffffff;
+    }
+    canvas {
+      display: block;
+    }
+    .info {
+      margin-top: 10px;
+      font-size: 14px;
+    }
+    .instructions {
+      margin-top: 5px;
+      font-size: 13px;
+      color: #555;
+      min-height: 1.4em;
+    }
+  </style>
+</head>
+<body>
+  <h1>Intersection over Union (IoU) Demo</h1>
+  <div class="controls">
+    <label for="modeSelect">Mode:</label>
+    <select id="modeSelect">
+      <option value="HBB">Regular bounding box (HBB)</option>
+      <option value="OBB5">Oriented bounding box (5 DoF)</option>
+      <option value="PAR6">Centre offset parallelogram (6 DoF)</option>
+      <option value="QUAD8">Quadrilateral (8 DoF)</option>
+    </select>
+    <button id="drawGTBtn">Draw GT box</button>
+    <button id="drawPredBtn">Draw prediction</button>
+  </div>
+  <div id="canvasContainer">
+    <canvas id="canvas" width="800" height="500"></canvas>
+  </div>
+  <div class="info">
+    <strong>IoU:</strong> <span id="iouValue">—</span>
+    <span id="formula"></span>
+  </div>
+  <div class="instructions" id="instruction">Select a mode and start drawing the ground truth box.</div>
+
+  <script>
+  (function() {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const modeSelect = document.getElementById('modeSelect');
+    const drawGTBtn = document.getElementById('drawGTBtn');
+    const drawPredBtn = document.getElementById('drawPredBtn');
+    const iouValueSpan = document.getElementById('iouValue');
+    const formulaSpan = document.getElementById('formula');
+    const instructionDiv = document.getElementById('instruction');
+
+    let mode = modeSelect.value; // Current drawing mode
+    let currentDrawing = null; // 'gt' or 'pred' when user is drawing
+    let gtPoly = null;
+    let predPoly = null;
+    let tempPoly = null; // Temporary polygon being drawn
+    let drawing = false;
+    let startPt = null;
+    let stage = 0; // Stage for OBB5 and PAR6 drawing
+
+    // Variables for dragging existing polygons when not drawing
+    let dragging = null; // 'gt' or 'pred' when dragging a polygon
+    let dragStart = null; // Starting mouse coordinates for dragging
+    let dragPolyStart = null; // Copy of polygon vertices when dragging starts
+
+    // Update UI state
+    function updateUI() {
+      drawGTBtn.disabled = drawing;
+      drawPredBtn.disabled = drawing;
+      modeSelect.disabled = drawing;
+    }
+
+    // Utility: compute area of a polygon using the shoelace formula
+    function polygonArea(poly) {
+      if (!poly || poly.length < 3) return 0;
+      let area = 0;
+      for (let i = 0; i < poly.length; i++) {
+        const [x1, y1] = poly[i];
+        const [x2, y2] = poly[(i + 1) % poly.length];
+        area += x1 * y2 - x2 * y1;
+      }
+      return Math.abs(area) / 2;
+    }
+
+    // Compute signed area of a polygon (positive for CCW, negative for CW)
+    function signedArea(poly) {
+      if (!poly || poly.length < 3) return 0;
+      let area = 0;
+      for (let i = 0; i < poly.length; i++) {
+        const [x1, y1] = poly[i];
+        const [x2, y2] = poly[(i + 1) % poly.length];
+        area += x1 * y2 - x2 * y1;
+      }
+      return area / 2;
+    }
+
+    // Ensure polygon vertices are in counter‑clockwise order (important for clipping)
+    function ensureCCW(poly) {
+      if (!poly) return poly;
+      // If signed area is negative, reverse to make CCW
+      return signedArea(poly) < 0 ? poly.slice().reverse() : poly;
+    }
+
+    // Sutherland–Hodgman convex polygon clipping
+    function clipPolygon(subjectPolygon, clipPolygon) {
+      let outputList = subjectPolygon.slice();
+      for (let i = 0; i < clipPolygon.length; i++) {
+        const cp1 = clipPolygon[i];
+        const cp2 = clipPolygon[(i + 1) % clipPolygon.length];
+        const inputList = outputList.slice();
+        outputList = [];
+        if (inputList.length === 0) break;
+        let S = inputList[inputList.length - 1];
+        for (const E of inputList) {
+          if (inside(E, cp1, cp2)) {
+            if (!inside(S, cp1, cp2)) {
+              outputList.push(intersectionPoint(cp1, cp2, S, E));
+            }
+            outputList.push(E);
+          } else if (inside(S, cp1, cp2)) {
+            outputList.push(intersectionPoint(cp1, cp2, S, E));
+          }
+          S = E;
+        }
+      }
+      return outputList;
+    }
+
+    // Check if point is on the inside side of clip edge
+    function inside(p, cp1, cp2) {
+      return (cp2[0] - cp1[0]) * (p[1] - cp1[1]) > (cp2[1] - cp1[1]) * (p[0] - cp1[0]);
+    }
+
+    // Compute intersection point of lines (cp1->cp2) and (s->e)
+    function intersectionPoint(cp1, cp2, s, e) {
+      const dc = [cp1[0] - cp2[0], cp1[1] - cp2[1]];
+      const dp = [s[0] - e[0], s[1] - e[1]];
+      const n1 = cp1[0] * cp2[1] - cp1[1] * cp2[0];
+      const n2 = s[0] * e[1] - s[1] * e[0];
+      const denominator = dc[0] * dp[1] - dc[1] * dp[0];
+      const x = (n1 * dp[0] - n2 * dc[0]) / denominator;
+      const y = (n1 * dp[1] - n2 * dc[1]) / denominator;
+      return [x, y];
+    }
+
+    // Compute IoU and update display
+    function computeIoU() {
+      if (!gtPoly || !predPoly) {
+        iouValueSpan.textContent = '—';
+        formulaSpan.textContent = '';
+        return;
+      }
+      // Ensure polygons are oriented counter‑clockwise for the clipping algorithm
+      const gtCCW = ensureCCW(gtPoly);
+      const predCCW = ensureCCW(predPoly);
+      const interPoly = clipPolygon(gtCCW, predCCW);
+      const interArea = polygonArea(interPoly);
+      const areaGT = polygonArea(gtCCW);
+      const areaPred = polygonArea(predCCW);
+      const unionArea = areaGT + areaPred - interArea;
+      const iou = unionArea > 0 ? interArea / unionArea : 0;
+      // Display the numeric IoU value
+      iouValueSpan.textContent = iou.toFixed(4);
+      /*
+       * Show a more expressive IoU formula.  IoU is defined as the
+       * ratio of the intersection area to the union area.  Present
+       * this relationship explicitly so users can see how the
+       * numerator (intersection area) and denominator (union area)
+       * contribute to the final value.
+       */
+      formulaSpan.innerHTML =
+        ` = (intersection / union) = ` +
+        `<span style="font-weight:bold">${interArea.toFixed(2)}</span>` +
+        ` / ` +
+        `<span style="font-weight:bold">${unionArea.toFixed(2)}</span>`;
+    }
+
+    // Utility functions for dragging detection
+    function boundingBox(poly) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const [px, py] of poly) {
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+      }
+      return { minX, maxX, minY, maxY };
+    }
+    function pointInBoundingBox(point, poly) {
+      const { minX, maxX, minY, maxY } = boundingBox(poly);
+      return point[0] >= minX && point[0] <= maxX && point[1] >= minY && point[1] <= maxY;
+    }
+
+    // Draw all shapes on the canvas
+    function redraw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // Draw GT polygon
+      if (gtPoly) {
+        drawPolygon(gtPoly, 'rgba(0, 123, 255, 0.4)', 'rgb(0, 123, 255)');
+      }
+      // Draw prediction polygon
+      if (predPoly) {
+        drawPolygon(predPoly, 'rgba(40, 167, 69, 0.4)', 'rgb(40, 167, 69)');
+      }
+      // Draw intersection shading
+      if (gtPoly && predPoly) {
+        const inter = clipPolygon(gtPoly, predPoly);
+        if (inter.length >= 3) {
+          drawPolygon(inter, 'rgba(155, 28, 128, 0.5)', null);
+        }
+      }
+      // Draw temp polygon while drawing
+      if (drawing && tempPoly) {
+        drawPolygon(tempPoly, 'rgba(255, 193, 7, 0.3)', 'rgb(255, 193, 7)', true);
+      }
+    }
+
+    function drawPolygon(poly, fillStyle, strokeStyle, dashed = false) {
+      if (!poly || poly.length === 0) return;
+      ctx.save();
+      if (dashed) ctx.setLineDash([5, 5]); else ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(poly[0][0], poly[0][1]);
+      for (let i = 1; i < poly.length; i++) {
+        ctx.lineTo(poly[i][0], poly[i][1]);
+      }
+      ctx.closePath();
+      if (fillStyle) {
+        ctx.fillStyle = fillStyle;
+        ctx.fill();
+      }
+      if (strokeStyle) {
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // Event handlers for mode change
+    modeSelect.addEventListener('change', () => {
+      mode = modeSelect.value;
+      instructionDiv.textContent = `Mode changed to ${mode}. Click 'Draw GT box' to start.`;
+    });
+
+    // Start drawing ground truth or prediction
+    drawGTBtn.addEventListener('click', () => {
+      if (drawing) return;
+      currentDrawing = 'gt';
+      drawing = true;
+      startPt = null;
+      stage = 0;
+      tempPoly = null;
+      instructionDiv.textContent = `Drawing ground truth in ${mode} mode.`;
+      updateUI();
+    });
+    drawPredBtn.addEventListener('click', () => {
+      if (drawing) return;
+      currentDrawing = 'pred';
+      drawing = true;
+      startPt = null;
+      stage = 0;
+      tempPoly = null;
+      instructionDiv.textContent = `Drawing prediction in ${mode} mode.`;
+      updateUI();
+    });
+
+    // Canvas mouse handlers
+    canvas.addEventListener('mousedown', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      // If not currently drawing, check if we should start dragging an existing polygon
+      if (!drawing) {
+        // Ground‑truth box dragging
+        if (gtPoly && pointInBoundingBox([x, y], gtPoly)) {
+          dragging = 'gt';
+          dragStart = [x, y];
+          dragPolyStart = gtPoly.map(pt => pt.slice());
+          instructionDiv.textContent = 'Dragging ground truth box. Release to drop.';
+          return;
+        }
+        // Prediction box dragging
+        if (predPoly && pointInBoundingBox([x, y], predPoly)) {
+          dragging = 'pred';
+          dragStart = [x, y];
+          dragPolyStart = predPoly.map(pt => pt.slice());
+          instructionDiv.textContent = 'Dragging prediction box. Release to drop.';
+          return;
+        }
+        // Otherwise, click on empty canvas when not drawing does nothing
+        return;
+      }
+
+      // If drawing, handle different modes
+      if (mode === 'HBB') {
+        startPt = [x, y];
+        tempPoly = [];
+      } else if (mode === 'OBB5') {
+        if (stage === 0) {
+          startPt = [x, y];
+          stage = 1;
+          tempPoly = [[x, y]];
+          instructionDiv.textContent = 'Drag to set width and orientation, then release.';
+        } else if (stage === 1) {
+          // second stage: set height
+          stage = 2;
+          instructionDiv.textContent = 'Drag to set height (perpendicular), then release.';
+        }
+      } else if (mode === 'PAR6') {
+        if (stage === 0) {
+          // begin drawing base rectangle (axis‑aligned)
+          startPt = [x, y];
+          tempPoly = [];
+        }
+        // For stages 1 and 2, dragging is handled in mousemove and mouseup
+      } else if (mode === 'QUAD8') {
+        if (!tempPoly) tempPoly = [];
+        tempPoly.push([x, y]);
+        if (tempPoly.length === 4) {
+          finalizeDrawing(tempPoly.slice());
+        } else {
+          instructionDiv.textContent = `Click point ${tempPoly.length + 1} of 4.`;
+        }
+      }
+      redraw();
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      // Handle dragging existing polygons when not drawing
+      if (!drawing) {
+        if (dragging) {
+          const dx = x - dragStart[0];
+          const dy = y - dragStart[1];
+          const newPoly = dragPolyStart.map(pt => [pt[0] + dx, pt[1] + dy]);
+          if (dragging === 'gt') {
+            gtPoly = newPoly;
+          } else if (dragging === 'pred') {
+            predPoly = newPoly;
+          }
+          redraw();
+          computeIoU();
+          return;
+        }
+        // not drawing and not dragging: nothing to preview
+        return;
+      }
+
+      // Preview during drawing
+
+      if (mode === 'HBB') {
+        if (startPt) {
+          const [sx, sy] = startPt;
+          tempPoly = [
+            [sx, sy],
+            [x, sy],
+            [x, y],
+            [sx, y]
+          ];
+        }
+      } else if (mode === 'OBB5') {
+        if (stage === 1 && startPt) {
+          // Drawing width and orientation
+          const [sx, sy] = startPt;
+          tempPoly = [[sx, sy], [x, y]]; // We'll show a line for width
+        } else if (stage === 2 && startPt) {
+          // Drawing height. Show provisional rectangle
+          const [sx, sy] = startPt;
+          // width vector from stage1 drawn earlier is stored in tempWidthVec
+          if (tempWidthVec) {
+            const widthVec = tempWidthVec;
+            const wLen = Math.hypot(widthVec[0], widthVec[1]);
+            const widthDir = [widthVec[0] / wLen, widthVec[1] / wLen];
+            const perpDir = [-widthDir[1], widthDir[0]];
+            // Project current mouse point onto perpendicular to determine height
+            const dx = x - sx;
+            const dy = y - sy;
+            const hProj = dx * perpDir[0] + dy * perpDir[1];
+            const height = 2 * hProj;
+            const cx = sx + widthVec[0] / 2 + perpDir[0] * height / 2;
+            const cy = sy + widthVec[1] / 2 + perpDir[1] * height / 2;
+            // compute rectangle corners
+            const hw = wLen / 2;
+            const hh = Math.abs(height) / 2;
+            const corner1 = [cx - widthDir[0] * hw - perpDir[0] * hh, cy - widthDir[1] * hw - perpDir[1] * hh];
+            const corner2 = [cx + widthDir[0] * hw - perpDir[0] * hh, cy + widthDir[1] * hw - perpDir[1] * hh];
+            const corner3 = [cx + widthDir[0] * hw + perpDir[0] * hh, cy + widthDir[1] * hw + perpDir[1] * hh];
+            const corner4 = [cx - widthDir[0] * hw + perpDir[0] * hh, cy - widthDir[1] * hw + perpDir[1] * hh];
+            tempPoly = [corner1, corner2, corner3, corner4];
+          }
+        }
+      } else if (mode === 'PAR6') {
+        if (stage === 0 && startPt) {
+          // Preview base rectangle during drawing
+          const [sx, sy] = startPt;
+          tempPoly = [
+            [sx, sy],
+            [x, sy],
+            [x, y],
+            [sx, y]
+          ];
+        } else if (stage === 1) {
+          // Preview horizontal offset (∆α) only
+          if (baseRect) {
+            const cx = (baseRect[0][0] + baseRect[2][0]) / 2;
+            const cy = (baseRect[0][1] + baseRect[2][1]) / 2;
+            const wVal = baseRect[1][0] - baseRect[0][0];
+            const hVal = baseRect[2][1] - baseRect[1][1];
+            const wAbs = Math.abs(wVal);
+            const hAbs = Math.abs(hVal);
+            // Raw horizontal offset relative to centre
+            const rawAlpha = x - cx;
+            // Clamp ∆α to within ±half width
+            const maxAlpha = wAbs / 2;
+            const deltaAlpha = Math.max(-maxAlpha, Math.min(maxAlpha, rawAlpha));
+            // No vertical offset in this stage
+            const deltaBeta = 0;
+            // Build parallelogram using clamped delta
+            const v1 = [cx + deltaAlpha, cy - hAbs / 2];
+            const v2 = [cx + wAbs / 2, cy + deltaBeta];
+            const v3 = [cx - deltaAlpha, cy + hAbs / 2];
+            const v4 = [cx - wAbs / 2, cy - deltaBeta];
+            tempPoly = [v1, v2, v3, v4];
+          }
+        } else if (stage === 2) {
+          // Preview both horizontal (∆α) and vertical (∆β) offsets
+          if (baseRect && offsetH !== null) {
+            const cx = (baseRect[0][0] + baseRect[2][0]) / 2;
+            const cy = (baseRect[0][1] + baseRect[2][1]) / 2;
+            const wVal = baseRect[1][0] - baseRect[0][0];
+            const hVal = baseRect[2][1] - baseRect[1][1];
+            const wAbs = Math.abs(wVal);
+            const hAbs = Math.abs(hVal);
+            // Use stored offsetH for ∆α but clamp within ±half width
+            const maxAlpha = wAbs / 2;
+            const deltaAlpha = Math.max(-maxAlpha, Math.min(maxAlpha, offsetH));
+            // Raw vertical offset
+            const rawBeta = y - cy;
+            const maxBeta = hAbs / 2;
+            const deltaBeta = Math.max(-maxBeta, Math.min(maxBeta, rawBeta));
+            const v1 = [cx + deltaAlpha, cy - hAbs / 2];
+            const v2 = [cx + wAbs / 2, cy + deltaBeta];
+            const v3 = [cx - deltaAlpha, cy + hAbs / 2];
+            const v4 = [cx - wAbs / 2, cy - deltaBeta];
+            tempPoly = [v1, v2, v3, v4];
+          }
+        }
+      }
+      redraw();
+    });
+
+    canvas.addEventListener('mouseup', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      // Finish dragging if active
+      if (!drawing && dragging) {
+        dragging = null;
+        dragStart = null;
+        dragPolyStart = null;
+        instructionDiv.textContent = 'Shape moved. You can draw or move other shapes.';
+        computeIoU();
+        return;
+      }
+      if (!drawing) return;
+
+      if (mode === 'HBB') {
+        if (startPt) {
+          const [sx, sy] = startPt;
+          const poly = [
+            [sx, sy],
+            [x, sy],
+            [x, y],
+            [sx, y]
+          ];
+          finalizeDrawing(poly);
+        }
+      } else if (mode === 'OBB5') {
+        if (stage === 1) {
+          // finish drawing width; store width vector
+          const [sx, sy] = startPt;
+          tempWidthVec = [x - sx, y - sy];
+          if (tempWidthVec[0] === 0 && tempWidthVec[1] === 0) {
+            instructionDiv.textContent = 'Zero-length width vector. Please drag to set width.';
+            return;
+          }
+          instructionDiv.textContent = 'Width set. Now drag perpendicular to set height.';
+          stage = 2;
+        } else if (stage === 2) {
+          // finish drawing height; finalize polygon
+          if (tempPoly && tempPoly.length === 4) {
+            finalizeDrawing(tempPoly.slice());
+          }
+        }
+      } else if (mode === 'PAR6') {
+        if (stage === 0) {
+          // finalize base rectangle (axis-aligned)
+          const [sx, sy] = startPt;
+          baseRect = [
+            [sx, sy],
+            [x, sy],
+            [x, y],
+            [sx, y]
+          ];
+          tempPoly = baseRect.slice();
+          instructionDiv.textContent = 'Base rectangle set. Now drag horizontally from centre to set horizontal offset.';
+          stage = 1;
+        } else if (stage === 1) {
+          // finalize horizontal offset (∆α) with clamping
+          if (baseRect) {
+            const cx = (baseRect[0][0] + baseRect[2][0]) / 2;
+            // Compute width; clamp the horizontal offset to ±half width
+            const wVal = baseRect[1][0] - baseRect[0][0];
+            const wAbs = Math.abs(wVal);
+            const rawAlpha = x - cx;
+            const maxAlpha = wAbs / 2;
+            offsetH = Math.max(-maxAlpha, Math.min(maxAlpha, rawAlpha));
+            instructionDiv.textContent = 'Horizontal offset set. Now drag vertically from centre to set vertical offset.';
+            stage = 2;
+          }
+        } else if (stage === 2) {
+          // finalize vertical offset (∆β) and complete parallelogram with clamping
+          if (baseRect && offsetH !== null) {
+            const cx = (baseRect[0][0] + baseRect[2][0]) / 2;
+            const cy = (baseRect[0][1] + baseRect[2][1]) / 2;
+            const wVal = baseRect[1][0] - baseRect[0][0];
+            const hVal = baseRect[2][1] - baseRect[1][1];
+            const wAbs = Math.abs(wVal);
+            const hAbs = Math.abs(hVal);
+            // deltaAlpha from offsetH, clamp again in case of changes
+            const maxAlpha = wAbs / 2;
+            const deltaAlpha = Math.max(-maxAlpha, Math.min(maxAlpha, offsetH));
+            const rawBeta = y - cy;
+            const maxBeta = hAbs / 2;
+            const deltaBeta = Math.max(-maxBeta, Math.min(maxBeta, rawBeta));
+            const v1 = [cx + deltaAlpha, cy - hAbs / 2];
+            const v2 = [cx + wAbs / 2, cy + deltaBeta];
+            const v3 = [cx - deltaAlpha, cy + hAbs / 2];
+            const v4 = [cx - wAbs / 2, cy - deltaBeta];
+            const poly = [v1, v2, v3, v4];
+            finalizeDrawing(poly);
+            // Reset offset for next drawing
+            offsetH = null;
+          }
+        }
+      }
+      redraw();
+    });
+
+    // Finalize drawing of a polygon and assign to GT or prediction
+    function finalizeDrawing(poly) {
+      // For quadrilaterals drawn by clicking four points, reorder vertices by angle around centroid
+      // to ensure a non‑self‑intersecting polygon. This makes the Sutherland–Hodgman clipping work reliably.
+      function sortVerticesByAngle(vertices) {
+        const n = vertices.length;
+        let cx = 0, cy = 0;
+        for (const [px, py] of vertices) {
+          cx += px;
+          cy += py;
+        }
+        cx /= n;
+        cy /= n;
+        return vertices.slice().sort((a, b) => {
+          const angleA = Math.atan2(a[1] - cy, a[0] - cx);
+          const angleB = Math.atan2(b[1] - cy, b[0] - cx);
+          return angleA - angleB;
+        });
+      }
+      let processedPoly = poly;
+      // If user clicked four points in QUAD8 mode, sort them
+      if (mode === 'QUAD8' && poly && poly.length === 4) {
+        processedPoly = sortVerticesByAngle(poly);
+      }
+      if (currentDrawing === 'gt') {
+        gtPoly = processedPoly;
+      } else if (currentDrawing === 'pred') {
+        predPoly = processedPoly;
+      }
+      drawing = false;
+      currentDrawing = null;
+      startPt = null;
+      tempPoly = null;
+      tempWidthVec = null;
+      baseRect = null;
+      offsetH = null;
+      stage = 0;
+      // reset dragging state after finalizing a shape
+      dragging = null;
+      dragStart = null;
+      dragPolyStart = null;
+      instructionDiv.textContent = 'Shape drawn. You can draw the other box or change mode.';
+      updateUI();
+      redraw();
+      computeIoU();
+    }
+
+    // Additional variables for complex modes
+    let tempWidthVec = null; // used in OBB5 to store width vector
+    let baseRect = null; // used in PAR6 for base rectangle
+    let offsetH = null; // used in PAR6 for horizontal offset
+
+    // Redraw initial state
+    redraw();
+  })();
+  </script>
+</body>
+</html>
