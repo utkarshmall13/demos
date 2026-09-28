@@ -168,8 +168,8 @@
     <label for="mSelect">Training sets M:</label>
     <select id="mSelect">
       <option value="20">20</option>
-      <option value="40" selected>40</option>
-      <option value="80">80</option>
+      <option value="40">40</option>
+      <option value="80" selected>80</option>
     </select>
     <label for="noiseSelect">Training label noise:</label>
     <select id="noiseSelect">
@@ -190,12 +190,12 @@
 
   <div class="controls">
     <span class="kLabel">λ = <span id="pValue">—</span></span>
-    <input type="range" id="pSlider" min="0" max="24" step="1" value="12">
+    <input type="range" id="pSlider" min="0" max="24" step="1" value="0">
   </div>
 
   <div class="panels">
     <div class="panel">
-      <div class="panelTitle">Decision regions of training set <span id="dsIdx">1</span> / <span id="dsTotal">40</span></div>
+      <div class="panelTitle">Decision regions of training set <span id="dsIdx">1</span> / <span id="dsTotal">80</span></div>
       <canvas id="regionCanvas" width="320" height="320"></canvas>
       <div class="panelNav">
         <button class="small" id="prevDs">&#9664; prev set</button>
