@@ -1,18 +1,23 @@
 <!--
-  SVM Bias–Variance Interactive Demo
+  Linear SVM Bias–Variance Interactive Demo
 
-  Soft-margin SVM with an RBF kernel, trained by SMO (maximal-violating-pair
-  working-set selection, warm-started across the C grid). The data are
-  linearly separable (cleanly, or noisily via label flips / overlapping
-  Gaussian blobs); the RBF kernel gives the model far more capacity than a
-  linear boundary needs, so the penalty C is the knob that trades bias for
-  variance: small C = smooth, heavily regularised boundary (high bias), large
-  C = every training point matters (high variance).
+  Soft-margin linear SVM (hinge loss + ||w||^2/2, penalty C on the slacks)
+  trained by SMO with maximal-violating-pair working-set selection, warm-
+  started across the C grid. The model is strictly linear; C is the knob that
+  trades bias for variance. For small C every point is a bounded support vector
+  and w is proportional to the mean difference (mu1 - mu0) (the nearest-
+  centroid rule), while for large C only the points near the margin matter and
+  the boundary follows them, including flipped labels and outliers. So a small C
+  costs bias exactly when the shared class covariance is anisotropic and not
+  aligned with the mean difference, and a large C costs variance when N is
+  small or the data are noisy. The datasets are textbook Gaussian class-
+  conditionals with a shared covariance (linear Bayes boundary), optionally
+  with flipped training labels.
 
   M independent training sets of N points are drawn and, for every C on a log
   grid, the fitted model's hard prediction is evaluated on a dense uniform
   grid. With p(x) = fraction of training sets predicting class 1 and y(x) the
-  (Bayes-optimal) true label:
+  Bayes-optimal label:
 
       Bias^2(x)   = (p(x) - y(x))^2
       Variance(x) = p(x) (1 - p(x))
@@ -26,7 +31,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SVM Bias–Variance Demo</title>
+  <title>Linear SVM Bias–Variance Demo</title>
   <style>
     body {
       font-family: Arial, Helvetica, sans-serif;
@@ -150,44 +155,45 @@
   </style>
 </head>
 <body>
-  <h1>RBF-Kernel SVM: Bias–Variance Trade-off</h1>
+  <h1>Linear SVM: Bias–Variance Trade-off</h1>
 
   <div class="controls">
     <label for="datasetSelect">Dataset:</label>
     <select id="datasetSelect">
-      <option value="linear" selected>Linear boundary (uniform samples)</option>
-      <option value="gap">Linear boundary with margin gap</option>
-      <option value="blobsFar">Two Gaussian blobs, well separated</option>
-      <option value="blobsNear">Two Gaussian blobs, overlapping</option>
+      <option value="aniso">Anisotropic Gaussians, shared covariance (ESL §4.3 / Friedman 1989)</option>
+      <option value="iso" selected>Isotropic Gaussians (Duda &amp; Hart)</option>
+      <option value="contam">Contaminated normal: 10% of points at 3× spread (Tukey 1960)</option>
+      <option value="iris">Fisher's Iris: Gaussian fit to versicolor vs virginica (petal length/width)</option>
     </select>
     <label for="nSelect">Training samples N:</label>
     <select id="nSelect">
+      <option value="5">5</option>
+      <option value="10">10</option>
       <option value="20">20</option>
+      <option value="50" selected>50</option>
+      <option value="100">100</option>
+      <option value="200">200</option>
+    </select>
+    <label for="priorSelect">Class prior π₁:</label>
+    <select id="priorSelect">
+      <option value="0.5">0.5 (balanced)</option>
+      <option value="0.65" selected>0.65</option>
+      <option value="0.8">0.8</option>
+    </select>
+    <label for="mSelect">Training sets M:</label>
+    <select id="mSelect">
       <option value="50">50</option>
       <option value="100">100</option>
       <option value="200" selected>200</option>
     </select>
-    <label for="mSelect">Training sets M:</label>
-    <select id="mSelect">
-      <option value="20">20</option>
-      <option value="40" selected>40</option>
-      <option value="80">80</option>
-    </select>
     <label for="noiseSelect">Training label noise:</label>
     <select id="noiseSelect">
-      <option value="0">0%</option>
+      <option value="0" selected>0%</option>
       <option value="0.05">5%</option>
-      <option value="0.1" selected>10%</option>
+      <option value="0.1">10%</option>
       <option value="0.2">20%</option>
     </select>
-    <label for="gammaSelect">RBF kernel γ:</label>
-    <select id="gammaSelect">
-      <option value="1">1</option>
-      <option value="2">2</option>
-      <option value="5" selected>5</option>
-      <option value="10">10</option>
-      <option value="20">20</option>
-    </select>
+
     <button id="regenBtn">Regenerate</button>
   </div>
 
@@ -198,7 +204,7 @@
 
   <div class="panels">
     <div class="panel">
-      <div class="panelTitle">Decision regions of training set <span id="dsIdx">1</span> / <span id="dsTotal">40</span> &nbsp;(<span id="svCount">—</span> support vectors ringed)</div>
+      <div class="panelTitle">Decision regions of training set <span id="dsIdx">1</span> / <span id="dsTotal">200</span> &nbsp;(<span id="svCount">—</span> support vectors ringed)</div>
       <canvas id="regionCanvas" width="320" height="320"></canvas>
       <div class="panelNav">
         <button class="small" id="prevDs">&#9664; prev set</button>
@@ -228,19 +234,32 @@
   <canvas id="chart" width="990" height="320"></canvas>
 
   <div class="explain">
-    <strong>Model.</strong> Soft-margin SVM with RBF kernel K(x, x') = exp(−γ‖x − x'‖²), trained by sequential
-    minimal optimisation. Support vectors are ringed in black in the left panel. The true boundary is always linear,
-    so the kernel gives the model far more capacity than it needs: with large C every misclassified or margin-violating
-    point is expensive, so the boundary wraps itself around individual training points (high variance); with small C
-    the margin term dominates, the boundary becomes very smooth and eventually collapses to a single class everywhere
-    (high bias). Larger γ makes the kernel more local and shifts the whole picture towards higher variance.
-    <strong>How this is computed.</strong> M independent training sets of N points are drawn (optionally with a
-    fraction of training labels flipped; the overlapping-blobs dataset is noisy by construction). For each C on a log
-    grid the fitted model's hard prediction f<sub>D</sub>(x) is evaluated on a uniform 80×80 grid. Writing p(x) for the
-    fraction of training sets predicting class 1 at x and y(x) ∈ {0, 1} for the true (Bayes-optimal) label,
-    <em>Bias²(x) = (p(x) − y(x))²</em>, <em>Variance(x) = p(x)(1 − p(x))</em>, and the expected 0-1 error
-    P[f<sub>D</sub>(x) ≠ y(x)] equals Bias²(x) + Variance(x) exactly, with zero irreducible error. Averaging over the
-    grid gives the curves. Click or drag on the chart to change C.
+    <strong>Model.</strong> Plain linear soft-margin SVM: minimise ½‖w‖² + C Σ<sub>i</sub> ξ<sub>i</sub> subject to
+    y<sub>i</sub>(w<sup>T</sup>x<sub>i</sub> + b) ≥ 1 − ξ<sub>i</sub>, solved in the dual by sequential minimal
+    optimisation. No kernel or feature expansion is used; support vectors are ringed in black in the left panel.
+    <strong>Why C trades bias for variance even for a linear model.</strong> For very small C every training point
+    becomes a bounded support vector (α<sub>i</sub> = C), so w = C Σ y<sub>i</sub>x<sub>i</sub> is just a multiple of
+    the mean difference μ̂₁ − μ̂₀: the nearest-centroid rule, very stable but biased whenever the Bayes direction
+    Σ<sup>−1</sup>(μ₁ − μ₀) points elsewhere. For very large C the margin term is negligible and the boundary is
+    dictated by the handful of points that violate it, so a few flipped labels or outliers swing it from sample to
+    sample (high variance). In between the margin acts as a regulariser. When the shared covariance is elongated and
+    not aligned with μ₁ − μ₀ (the ESL §4.3 / Friedman 1989 setting) the bias at small C is large; for spherical
+    classes (Duda &amp; Hart) the two directions coincide and small C is almost free.
+    <strong>Datasets.</strong> Anisotropic shared-covariance Gaussians; isotropic Gaussians; Tukey's contaminated
+    normal (10% of points drawn with 3× the spread, a classic robustness test); and Gaussian class-conditionals fitted
+    to Fisher's Iris (versicolor vs virginica on petal length and width, pooled covariance, published class means,
+    standard deviations and correlations). All have a linear Bayes boundary, drawn in black.
+    <strong>Class prior.</strong> π₁ is the probability of class 1; the Bayes boundary shifts by log(π₁/π₀).
+    With exactly balanced classes the fully regularised model predicts the majority class of its own sample, a coin
+    flip, so variance rises again at the far end of the chart; π₁ = 0.65 makes that collapse deterministic, leaving
+    pure bias. A linear model in 2D has only three parameters, so its variance is inherently small: expect the
+    under-regularised end to sit only modestly above the minimum, and the over-regularised end far above it.
+    <strong>How this is computed.</strong> M independent training sets of N points are drawn (optionally with a fraction
+    of training labels flipped). For each C on a log grid the fitted model's hard prediction f<sub>D</sub>(x) is
+    evaluated on a uniform 80×80 grid. Writing p(x) for the fraction of training sets predicting class 1 at x and
+    y(x) ∈ {0, 1} for the Bayes-optimal label, <em>Bias²(x) = (p(x) − y(x))²</em>, <em>Variance(x) = p(x)(1 − p(x))</em>,
+    and the expected 0-1 error P[f<sub>D</sub>(x) ≠ y(x)] equals Bias²(x) + Variance(x) exactly, with zero irreducible
+    error. Averaging over the grid gives the curves. Click or drag on the chart to change C.
   </div>
 
   <script>
@@ -248,7 +267,7 @@
     // ---------- DOM ----------
     const $ = id => document.getElementById(id);
     const datasetSelect = $('datasetSelect'), nSelect = $('nSelect'), mSelect = $('mSelect');
-    const noiseSelect = $('noiseSelect'), regenBtn = $('regenBtn'), pSlider = $('pSlider'), pValue = $('pValue');
+    const noiseSelect = $('noiseSelect'), priorSelect = $('priorSelect'), regenBtn = $('regenBtn'), pSlider = $('pSlider'), pValue = $('pValue');
     const regionCanvas = $('regionCanvas'), biasCanvas = $('biasCanvas'), varCanvas = $('varCanvas');
     const chart = $('chart'), statusDiv = $('status');
     const biasVal = $('biasVal'), varVal = $('varVal'), errVal = $('errVal'), minInfo = $('minInfo');
@@ -264,36 +283,54 @@
     const BIAS_COL = [42, 157, 74];    // green
     const VAR_COL = [123, 63, 191];    // purple
 
-    // ---------- Datasets: every one has a linear Bayes boundary ----------
+    // ---------- Datasets: two Gaussian classes with a shared covariance ----------
+    // Equal covariances make the Bayes-optimal boundary linear:
+    //   w = Σ⁻¹(μ1 − μ0), offset from the midpoint of the means by the log prior ratio.
     // s(x, y) is the signed distance to that boundary; true label = s > 0.
-    const LIN = (x, y) => (y - 0.6 * x + 0.15) / Math.sqrt(1.36);
-    const blob = (c0, c1, sigma) => {
-      const mx = (c0[0] + c1[0]) / 2, my = (c0[1] + c1[1]) / 2;
-      let dx = c1[0] - c0[0], dy = c1[1] - c0[1];
-      const len = Math.hypot(dx, dy); dx /= len; dy /= len;
-      return { kind: 'blobs', c0, c1, sigma, s: (x, y) => (x - mx) * dx + (y - my) * dy };
+    function gauss2(mu0, mu1, cov, contam) {
+      const [sxx, sxy, syy] = cov;
+      const det = sxx * syy - sxy * sxy;
+      const dmx = mu1[0] - mu0[0], dmy = mu1[1] - mu0[1];
+      let wx = (syy * dmx - sxy * dmy) / det, wy = (-sxy * dmx + sxx * dmy) / det;
+      const nrm = Math.hypot(wx, wy); wx /= nrm; wy /= nrm;
+      const mx = (mu0[0] + mu1[0]) / 2, my = (mu0[1] + mu1[1]) / 2;
+      // Cholesky factor of Σ for sampling
+      const a = Math.sqrt(sxx), b = sxy / a, c = Math.sqrt(Math.max(syy - b * b, 1e-12));
+      // Bayes log-odds = Δμᵀ Σ⁻¹ (x − mid) + log(π1/π0); divided by |Σ⁻¹Δμ| to get a distance.
+      return { mu0, mu1, L: [a, b, c], contam: contam || null,
+               s: (x, y) => (x - mx) * wx + (y - my) * wy + Math.log(state.p1 / (1 - state.p1)) / nrm };
+    }
+    // covariance with given standard deviations along a rotated major/minor axis
+    const rotCov = (sdMajor, sdMinor, angle) => {
+      const cs = Math.cos(angle), sn = Math.sin(angle), A = sdMajor * sdMajor, B = sdMinor * sdMinor;
+      return [A * cs * cs + B * sn * sn, (A - B) * cs * sn, A * sn * sn + B * cs * cs];
     };
     const DATASETS = {
-      linear:    { kind: 'uniform', gap: 0,   s: LIN },
-      gap:       { kind: 'uniform', gap: 0.3, s: LIN },
-      blobsFar:  blob([-0.5, -0.35], [0.5, 0.35], 0.2),
-      blobsNear: blob([-0.5, -0.35], [0.5, 0.35], 0.45)
+      // Elongated along the diagonal, means shifted horizontally: Σ⁻¹Δμ (Bayes) and Δμ (nearest
+      // centroid) point in very different directions, so shrinking w costs real bias.
+      aniso:  gauss2([-0.25, 0], [0.25, 0], rotCov(0.5, 0.12, Math.PI / 4)),
+      // Spherical classes: Bayes direction equals the mean difference, shrinkage is nearly harmless.
+      iso:    gauss2([-0.4, -0.3], [0.4, 0.3], [0.09, 0, 0.09]),
+      // Tukey's contaminated normal: same as above but 10% of points drawn with 3x the spread.
+      contam: gauss2([-0.4, -0.3], [0.4, 0.3], [0.09, 0, 0.09], { p: 0.1, scale: 3 }),
+      // Fisher's Iris, versicolor (class 0) vs virginica (class 1), petal length vs petal width,
+      // Gaussian fit with pooled covariance; axes rescaled as x = (PL - 4.9)/1.6, y = (PW - 1.68)/0.9.
+      iris:   gauss2([-0.400, -0.393], [0.408, 0.384], [0.1027, 0.0424, 0.0709])
     };
 
     // ---------- Model (regularisation parameter grid + fitting) ----------
     const MODEL = (function () {
       const params = [];
-      for (let e = -2; e <= 4.0001; e += 0.25) params.push(Math.pow(10, e));
-      let gamma = 5;
+      for (let e = -3; e <= 3.0001; e += 0.25) params.push(Math.pow(10, e));
 
-      function readOptions() { gamma = +$('gammaSelect').value; }
+      function readOptions() {}
       function prepare() {}
 
       // SMO with maximal-violating-pair working-set selection (Keerthi et al. / LIBSVM WSS1).
-      // K: kernel matrix, y: +-1 labels, alpha and Gr (gradient of the dual objective) are
-      // updated in place so that successive calls with increasing C warm-start.
+      // K: linear-kernel Gram matrix, y: +-1 labels; alpha and Gr (gradient of the dual objective)
+      // are updated in place so that successive calls with increasing C warm-start.
       function smo(K, y, N, C, alpha, Gr) {
-        const eps = 1e-3, tau = 1e-12, maxIter = 60 * N;
+        const eps = 1e-3, tau = 1e-12, maxIter = Math.min(20000, 100 * N + 1000);
         for (let iter = 0; iter < maxIter; iter++) {
           let i = -1, j = -1, gmax = -Infinity, gmin = Infinity;
           for (let t = 0; t < N; t++) {
@@ -347,42 +384,29 @@
         const N = state.N, xs = set.x, ys = set.y;
         const y = new Float64Array(N);
         for (let i = 0; i < N; i++) y[i] = set.lab[i] ? 1 : -1;
-        const K = new Float64Array(N * N);
-        for (let i = 0; i < N; i++) for (let j = 0; j <= i; j++) {
-          const dx = xs[i] - xs[j], dy = ys[i] - ys[j];
-          K[i * N + j] = K[j * N + i] = Math.exp(-gamma * (dx * dx + dy * dy));
-        }
-        const KG = new Float32Array(GG * N);
-        for (let r = 0; r < G; r++) for (let c = 0; c < G; c++) {
-          const gx = gridX(c), gy = gridY(r), off = (r * G + c) * N;
-          for (let i = 0; i < N; i++) {
-            const dx = xs[i] - gx, dy = ys[i] - gy;
-            KG[off + i] = Math.exp(-gamma * (dx * dx + dy * dy));
-          }
-        }
+        const K = new Float64Array(N * N);   // linear kernel: plain dot products
+        for (let i = 0; i < N; i++) for (let j = 0; j <= i; j++) K[i * N + j] = K[j * N + i] = xs[i] * xs[j] + ys[i] * ys[j];
         const alpha = new Float64Array(N), Gr = new Float64Array(N).fill(-1);
-        const sv = new Int32Array(N), coef = new Float64Array(N);
         // Weakest regularisation (smallest C) first; alpha stays feasible as C grows.
         for (let pi = 0; pi < params.length; pi++) {
           const C = params[pi];
           smo(K, y, N, C, alpha, Gr);
           const rho = calcRho(y, alpha, Gr, N, C);
-          let nsv = 0;
+          let wx = 0, wy = 0;
           const sbase = (m * params.length + pi) * N;
           for (let i = 0; i < N; i++) {
-            if (alpha[i] > 1e-10) { sv[nsv] = i; coef[nsv] = alpha[i] * y[i]; nsv++; svFlags[sbase + i] = 1; }
+            if (alpha[i] > 1e-10) { wx += alpha[i] * y[i] * xs[i]; wy += alpha[i] * y[i] * ys[i]; svFlags[sbase + i] = 1; }
           }
           const base = (m * params.length + pi) * GG;
-          for (let g = 0; g < GG; g++) {
-            let s = -rho; const off = g * N;
-            for (let t = 0; t < nsv; t++) s += coef[t] * KG[off + sv[t]];
-            preds[base + g] = s > 0 ? 1 : 0;
+          for (let r = 0; r < G; r++) {
+            const gy = gridY(r);
+            for (let c = 0; c < G; c++) preds[base + r * G + c] = (wx * gridX(c) + wy * gy - rho) > 0 ? 1 : 0;
           }
         }
       }
 
       return {
-        params, symbol: 'C', usesSV: true, optionIds: ['gammaSelect'],
+        params, symbol: 'C', usesSV: true, optionIds: [],
         axisLabel: 'SVM penalty C (log scale; larger = less regularisation)',
         readOptions, prepare, fitSet
       };
@@ -390,7 +414,7 @@
     const P = MODEL.params.length;
 
     // ---------- State ----------
-    const state = { key: datasetSelect.value, N: +nSelect.value, M: +mSelect.value, noise: +noiseSelect.value, pi: +pSlider.value, dsIdx: 0, seed: 1 };
+    const state = { key: datasetSelect.value, N: +nSelect.value, M: +mSelect.value, noise: +noiseSelect.value, p1: +priorSelect.value, pi: +pSlider.value, dsIdx: 0, seed: 1 };
     let sets = [];            // [{x: Float64Array, y: Float64Array, lab: Uint8Array}]
     const truth = new Uint8Array(GG);
     let preds = null;         // Uint8Array(M * P * GG): hard prediction of each (set, param) on the grid
@@ -431,17 +455,13 @@
       for (let m = 0; m < state.M; m++) {
         const x = new Float64Array(state.N), y = new Float64Array(state.N), lab = new Uint8Array(state.N);
         for (let i = 0; i < state.N; i++) {
-          if (ds.kind === 'uniform') {
-            let px, py;
-            do { px = rnd() * 2 - 1; py = rnd() * 2 - 1; } while (Math.abs(ds.s(px, py)) < ds.gap / 2);
-            x[i] = px; y[i] = py; lab[i] = ds.s(px, py) > 0 ? 1 : 0;
-          } else {
-            const cls = rnd() < 0.5 ? 0 : 1;
-            const c = cls ? ds.c1 : ds.c0;
-            x[i] = c[0] + ds.sigma * gauss();
-            y[i] = c[1] + ds.sigma * gauss();
-            lab[i] = cls;
-          }
+          const cls = rnd() < state.p1 ? 1 : 0;
+          const mu = cls ? ds.mu1 : ds.mu0;
+          const sc = (ds.contam && rnd() < ds.contam.p) ? ds.contam.scale : 1;
+          const z1 = gauss(), z2 = gauss();
+          x[i] = mu[0] + sc * ds.L[0] * z1;
+          y[i] = mu[1] + sc * (ds.L[1] * z1 + ds.L[2] * z2);
+          lab[i] = cls;
           if (state.noise > 0 && rnd() < state.noise) lab[i] = 1 - lab[i];
         }
         sets.push({ x, y, lab });
@@ -782,6 +802,7 @@
       state.N = +nSelect.value;
       state.M = +mSelect.value;
       state.noise = +noiseSelect.value;
+      state.p1 = +priorSelect.value;
       state.dsIdx = Math.min(state.dsIdx, state.M - 1);
       dsTotalSpan.textContent = state.M;
       pValue.textContent = fmtParam(MODEL.params[state.pi]);
@@ -799,6 +820,7 @@
     nSelect.addEventListener('change', regenerate);
     mSelect.addEventListener('change', regenerate);
     noiseSelect.addEventListener('change', regenerate);
+    priorSelect.addEventListener('change', regenerate);
     for (const id of MODEL.optionIds) $(id).addEventListener('change', regenerate);
     regenBtn.addEventListener('click', () => { state.seed++; regenerate(); });
 
