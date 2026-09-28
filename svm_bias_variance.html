@@ -1,0 +1,835 @@
+<!--
+  SVM Bias–Variance Interactive Demo
+
+  Soft-margin SVM with an RBF kernel, trained by SMO (maximal-violating-pair
+  working-set selection, warm-started across the C grid). The data are
+  linearly separable (cleanly, or noisily via label flips / overlapping
+  Gaussian blobs); the RBF kernel gives the model far more capacity than a
+  linear boundary needs, so the penalty C is the knob that trades bias for
+  variance: small C = smooth, heavily regularised boundary (high bias), large
+  C = every training point matters (high variance).
+
+  M independent training sets of N points are drawn and, for every C on a log
+  grid, the fitted model's hard prediction is evaluated on a dense uniform
+  grid. With p(x) = fraction of training sets predicting class 1 and y(x) the
+  (Bayes-optimal) true label:
+
+      Bias^2(x)   = (p(x) - y(x))^2
+      Variance(x) = p(x) (1 - p(x))
+      Error(x)    = P[ f_D(x) != y(x) ] = Bias^2(x) + Variance(x)   (exactly)
+
+  The irreducible term is zero because y(x) is deterministic on the grid.
+  Vanilla JavaScript only.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SVM Bias–Variance Demo</title>
+  <style>
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      margin: 0;
+      padding: 0 0 30px 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background: #fafafa;
+      color: #333;
+    }
+    h1 {
+      margin-top: 20px;
+      margin-bottom: 10px;
+      font-size: 24px;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 10px 16px;
+      margin-bottom: 10px;
+    }
+    select, button {
+      padding: 8px 12px;
+      font-size: 14px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    button {
+      cursor: pointer;
+      background-color: #007acc;
+      color: white;
+    }
+    button:disabled {
+      background-color: #999;
+      cursor: not-allowed;
+    }
+    button.small {
+      padding: 3px 10px;
+      font-size: 12px;
+    }
+    label {
+      font-size: 14px;
+    }
+    input[type=range] {
+      width: 320px;
+      vertical-align: middle;
+    }
+    .kLabel {
+      font-size: 16px;
+      font-weight: bold;
+      min-width: 110px;
+      display: inline-block;
+    }
+    .panels {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 14px;
+      margin-top: 6px;
+    }
+    .panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .panelTitle {
+      font-size: 13px;
+      margin-bottom: 4px;
+      height: 1.4em;
+    }
+    .panelNav {
+      margin-top: 4px;
+      display: flex;
+      gap: 6px;
+      height: 26px;
+    }
+    canvas {
+      display: block;
+    }
+    .panel canvas {
+      border: 1px solid #ccc;
+      background: #ffffff;
+    }
+    #chart {
+      border: 1px solid #ccc;
+      background: #ffffff;
+      margin-top: 12px;
+      cursor: crosshair;
+    }
+    .info {
+      margin-top: 10px;
+      font-size: 14px;
+    }
+    .info span.val {
+      font-weight: bold;
+    }
+    .status {
+      margin-top: 4px;
+      font-size: 13px;
+      color: #555;
+      min-height: 1.4em;
+    }
+    .explain {
+      max-width: 980px;
+      font-size: 13px;
+      color: #555;
+      line-height: 1.55;
+      margin: 12px 20px 0 20px;
+    }
+    .swatch {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      vertical-align: middle;
+      margin-right: 4px;
+      border: 1px solid #999;
+    }
+  </style>
+</head>
+<body>
+  <h1>RBF-Kernel SVM: Bias–Variance Trade-off</h1>
+
+  <div class="controls">
+    <label for="datasetSelect">Dataset:</label>
+    <select id="datasetSelect">
+      <option value="linear" selected>Linear boundary (uniform samples)</option>
+      <option value="gap">Linear boundary with margin gap</option>
+      <option value="blobsFar">Two Gaussian blobs, well separated</option>
+      <option value="blobsNear">Two Gaussian blobs, overlapping</option>
+    </select>
+    <label for="nSelect">Training samples N:</label>
+    <select id="nSelect">
+      <option value="20">20</option>
+      <option value="50">50</option>
+      <option value="100" selected>100</option>
+      <option value="200">200</option>
+    </select>
+    <label for="mSelect">Training sets M:</label>
+    <select id="mSelect">
+      <option value="20">20</option>
+      <option value="40" selected>40</option>
+      <option value="80">80</option>
+    </select>
+    <label for="noiseSelect">Training label noise:</label>
+    <select id="noiseSelect">
+      <option value="0">0%</option>
+      <option value="0.05">5%</option>
+      <option value="0.1" selected>10%</option>
+      <option value="0.2">20%</option>
+    </select>
+    <label for="gammaSelect">RBF kernel γ:</label>
+    <select id="gammaSelect">
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="5" selected>5</option>
+      <option value="10">10</option>
+      <option value="20">20</option>
+    </select>
+    <button id="regenBtn">Regenerate</button>
+  </div>
+
+  <div class="controls">
+    <span class="kLabel">C = <span id="pValue">—</span></span>
+    <input type="range" id="pSlider" min="0" max="24" step="1" value="12">
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <div class="panelTitle">Decision regions of training set <span id="dsIdx">1</span> / <span id="dsTotal">40</span> &nbsp;(<span id="svCount">—</span> support vectors ringed)</div>
+      <canvas id="regionCanvas" width="320" height="320"></canvas>
+      <div class="panelNav">
+        <button class="small" id="prevDs">&#9664; prev set</button>
+        <button class="small" id="nextDs">next set &#9654;</button>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panelTitle">Bias² map &nbsp;(p(x) − y(x))²</div>
+      <canvas id="biasCanvas" width="320" height="320"></canvas>
+      <div class="panelNav"></div>
+    </div>
+    <div class="panel">
+      <div class="panelTitle">Variance map &nbsp;p(x)(1 − p(x))</div>
+      <canvas id="varCanvas" width="320" height="320"></canvas>
+      <div class="panelNav"></div>
+    </div>
+  </div>
+
+  <div class="info" id="info">
+    <span class="swatch" style="background:#2a9d4a"></span>Bias² = <span class="val" id="biasVal">—</span> &nbsp;&nbsp;
+    <span class="swatch" style="background:#7b3fbf"></span>Variance = <span class="val" id="varVal">—</span> &nbsp;&nbsp;
+    <span class="swatch" style="background:#222"></span>Total error = <span class="val" id="errVal">—</span> &nbsp;&nbsp;
+    <span id="minInfo"></span>
+  </div>
+  <div class="status" id="status"></div>
+
+  <canvas id="chart" width="990" height="320"></canvas>
+
+  <div class="explain">
+    <strong>Model.</strong> Soft-margin SVM with RBF kernel K(x, x') = exp(−γ‖x − x'‖²), trained by sequential
+    minimal optimisation. Support vectors are ringed in black in the left panel. The true boundary is always linear,
+    so the kernel gives the model far more capacity than it needs: with large C every misclassified or margin-violating
+    point is expensive, so the boundary wraps itself around individual training points (high variance); with small C
+    the margin term dominates, the boundary becomes very smooth and eventually collapses to a single class everywhere
+    (high bias). Larger γ makes the kernel more local and shifts the whole picture towards higher variance.
+    <strong>How this is computed.</strong> M independent training sets of N points are drawn (optionally with a
+    fraction of training labels flipped; the overlapping-blobs dataset is noisy by construction). For each C on a log
+    grid the fitted model's hard prediction f<sub>D</sub>(x) is evaluated on a uniform 80×80 grid. Writing p(x) for the
+    fraction of training sets predicting class 1 at x and y(x) ∈ {0, 1} for the true (Bayes-optimal) label,
+    <em>Bias²(x) = (p(x) − y(x))²</em>, <em>Variance(x) = p(x)(1 − p(x))</em>, and the expected 0-1 error
+    P[f<sub>D</sub>(x) ≠ y(x)] equals Bias²(x) + Variance(x) exactly, with zero irreducible error. Averaging over the
+    grid gives the curves. Click or drag on the chart to change C.
+  </div>
+
+  <script>
+  (function () {
+    // ---------- DOM ----------
+    const $ = id => document.getElementById(id);
+    const datasetSelect = $('datasetSelect'), nSelect = $('nSelect'), mSelect = $('mSelect');
+    const noiseSelect = $('noiseSelect'), regenBtn = $('regenBtn'), pSlider = $('pSlider'), pValue = $('pValue');
+    const regionCanvas = $('regionCanvas'), biasCanvas = $('biasCanvas'), varCanvas = $('varCanvas');
+    const chart = $('chart'), statusDiv = $('status');
+    const biasVal = $('biasVal'), varVal = $('varVal'), errVal = $('errVal'), minInfo = $('minInfo');
+    const dsIdxSpan = $('dsIdx'), dsTotalSpan = $('dsTotal'), prevDs = $('prevDs'), nextDs = $('nextDs');
+
+    const G = 80;                 // evaluation grid: G x G cells over [-1, 1]^2
+    const GG = G * G;
+    const SIZE = regionCanvas.width;
+
+    // Class colours (light fills for regions, saturated for points)
+    const C0 = [66, 133, 244], C1 = [244, 132, 44];
+    const C0_LIGHT = [189, 212, 251], C1_LIGHT = [251, 212, 181];
+    const BIAS_COL = [42, 157, 74];    // green
+    const VAR_COL = [123, 63, 191];    // purple
+
+    // ---------- Datasets: every one has a linear Bayes boundary ----------
+    // s(x, y) is the signed distance to that boundary; true label = s > 0.
+    const LIN = (x, y) => (y - 0.6 * x + 0.15) / Math.sqrt(1.36);
+    const blob = (c0, c1, sigma) => {
+      const mx = (c0[0] + c1[0]) / 2, my = (c0[1] + c1[1]) / 2;
+      let dx = c1[0] - c0[0], dy = c1[1] - c0[1];
+      const len = Math.hypot(dx, dy); dx /= len; dy /= len;
+      return { kind: 'blobs', c0, c1, sigma, s: (x, y) => (x - mx) * dx + (y - my) * dy };
+    };
+    const DATASETS = {
+      linear:    { kind: 'uniform', gap: 0,   s: LIN },
+      gap:       { kind: 'uniform', gap: 0.3, s: LIN },
+      blobsFar:  blob([-0.5, -0.35], [0.5, 0.35], 0.2),
+      blobsNear: blob([-0.5, -0.35], [0.5, 0.35], 0.45)
+    };
+
+    // ---------- Model (regularisation parameter grid + fitting) ----------
+    const MODEL = (function () {
+      const params = [];
+      for (let e = -2; e <= 4.0001; e += 0.25) params.push(Math.pow(10, e));
+      let gamma = 5;
+
+      function readOptions() { gamma = +$('gammaSelect').value; }
+      function prepare() {}
+
+      // SMO with maximal-violating-pair working-set selection (Keerthi et al. / LIBSVM WSS1).
+      // K: kernel matrix, y: +-1 labels, alpha and Gr (gradient of the dual objective) are
+      // updated in place so that successive calls with increasing C warm-start.
+      function smo(K, y, N, C, alpha, Gr) {
+        const eps = 1e-3, tau = 1e-12, maxIter = 60 * N;
+        for (let iter = 0; iter < maxIter; iter++) {
+          let i = -1, j = -1, gmax = -Infinity, gmin = Infinity;
+          for (let t = 0; t < N; t++) {
+            const yt = y[t], a = alpha[t], v = -yt * Gr[t];
+            const inUp = yt > 0 ? a < C : a > 0;
+            const inLow = yt > 0 ? a > 0 : a < C;
+            if (inUp && v > gmax) { gmax = v; i = t; }
+            if (inLow && v < gmin) { gmin = v; j = t; }
+          }
+          if (i < 0 || j < 0 || gmax - gmin < eps) break;
+          const yi = y[i], yj = y[j];
+          const Qii = K[i * N + i], Qjj = K[j * N + j], Qij = yi * yj * K[i * N + j];
+          const oldAi = alpha[i], oldAj = alpha[j];
+          if (yi !== yj) {
+            let quad = Qii + Qjj + 2 * Qij; if (quad <= 0) quad = tau;
+            const delta = (-Gr[i] - Gr[j]) / quad;
+            const diff = alpha[i] - alpha[j];
+            alpha[i] += delta; alpha[j] += delta;
+            if (diff > 0) { if (alpha[j] < 0) { alpha[j] = 0; alpha[i] = diff; } }
+            else { if (alpha[i] < 0) { alpha[i] = 0; alpha[j] = -diff; } }
+            if (diff > 0) { if (alpha[i] > C) { alpha[i] = C; alpha[j] = C - diff; } }
+            else { if (alpha[j] > C) { alpha[j] = C; alpha[i] = C + diff; } }
+          } else {
+            let quad = Qii + Qjj - 2 * Qij; if (quad <= 0) quad = tau;
+            const delta = (Gr[i] - Gr[j]) / quad;
+            const sum = alpha[i] + alpha[j];
+            alpha[i] -= delta; alpha[j] += delta;
+            if (sum > C) { if (alpha[i] > C) { alpha[i] = C; alpha[j] = sum - C; } }
+            else { if (alpha[j] < 0) { alpha[j] = 0; alpha[i] = sum; } }
+            if (sum > C) { if (alpha[j] > C) { alpha[j] = C; alpha[i] = sum - C; } }
+            else { if (alpha[i] < 0) { alpha[i] = 0; alpha[j] = sum; } }
+          }
+          const dAi = alpha[i] - oldAi, dAj = alpha[j] - oldAj;
+          if (dAi === 0 && dAj === 0) break;
+          const ci = yi * dAi, cj = yj * dAj;
+          for (let t = 0; t < N; t++) Gr[t] += y[t] * (K[t * N + i] * ci + K[t * N + j] * cj);
+        }
+      }
+      function calcRho(y, alpha, Gr, N, C) {
+        let ub = Infinity, lb = -Infinity, sum = 0, nf = 0;
+        for (let t = 0; t < N; t++) {
+          const yG = y[t] * Gr[t];
+          if (alpha[t] >= C - 1e-12) { if (y[t] < 0) ub = Math.min(ub, yG); else lb = Math.max(lb, yG); }
+          else if (alpha[t] <= 1e-12) { if (y[t] > 0) ub = Math.min(ub, yG); else lb = Math.max(lb, yG); }
+          else { nf++; sum += yG; }
+        }
+        return nf > 0 ? sum / nf : (ub + lb) / 2;
+      }
+
+      function fitSet(set, m, preds, svFlags) {
+        const N = state.N, xs = set.x, ys = set.y;
+        const y = new Float64Array(N);
+        for (let i = 0; i < N; i++) y[i] = set.lab[i] ? 1 : -1;
+        const K = new Float64Array(N * N);
+        for (let i = 0; i < N; i++) for (let j = 0; j <= i; j++) {
+          const dx = xs[i] - xs[j], dy = ys[i] - ys[j];
+          K[i * N + j] = K[j * N + i] = Math.exp(-gamma * (dx * dx + dy * dy));
+        }
+        const KG = new Float32Array(GG * N);
+        for (let r = 0; r < G; r++) for (let c = 0; c < G; c++) {
+          const gx = gridX(c), gy = gridY(r), off = (r * G + c) * N;
+          for (let i = 0; i < N; i++) {
+            const dx = xs[i] - gx, dy = ys[i] - gy;
+            KG[off + i] = Math.exp(-gamma * (dx * dx + dy * dy));
+          }
+        }
+        const alpha = new Float64Array(N), Gr = new Float64Array(N).fill(-1);
+        const sv = new Int32Array(N), coef = new Float64Array(N);
+        // Weakest regularisation (smallest C) first; alpha stays feasible as C grows.
+        for (let pi = 0; pi < params.length; pi++) {
+          const C = params[pi];
+          smo(K, y, N, C, alpha, Gr);
+          const rho = calcRho(y, alpha, Gr, N, C);
+          let nsv = 0;
+          const sbase = (m * params.length + pi) * N;
+          for (let i = 0; i < N; i++) {
+            if (alpha[i] > 1e-10) { sv[nsv] = i; coef[nsv] = alpha[i] * y[i]; nsv++; svFlags[sbase + i] = 1; }
+          }
+          const base = (m * params.length + pi) * GG;
+          for (let g = 0; g < GG; g++) {
+            let s = -rho; const off = g * N;
+            for (let t = 0; t < nsv; t++) s += coef[t] * KG[off + sv[t]];
+            preds[base + g] = s > 0 ? 1 : 0;
+          }
+        }
+      }
+
+      return {
+        params, symbol: 'C', usesSV: true, optionIds: ['gammaSelect'],
+        axisLabel: 'SVM penalty C (log scale; larger = less regularisation)',
+        readOptions, prepare, fitSet
+      };
+    })();
+    const P = MODEL.params.length;
+
+    // ---------- State ----------
+    const state = { key: datasetSelect.value, N: +nSelect.value, M: +mSelect.value, noise: +noiseSelect.value, pi: +pSlider.value, dsIdx: 0, seed: 1 };
+    let sets = [];            // [{x: Float64Array, y: Float64Array, lab: Uint8Array}]
+    const truth = new Uint8Array(GG);
+    let preds = null;         // Uint8Array(M * P * GG): hard prediction of each (set, param) on the grid
+    let svFlags = null;       // Uint8Array(M * P * N): support-vector flags (SVM only)
+    let counts = null;        // Uint16Array(P * GG): #training sets predicting class 1
+    let curves = null;        // {bias2, vari, err}: Float64Array(P) each
+    let contour = [];         // true-boundary line segments in canvas coordinates
+    let ready = false;
+    let computeToken = 0;
+
+    // Seeded PRNG (mulberry32)
+    function mulberry32(a) {
+      return function () {
+        a |= 0; a = a + 0x6D2B79F5 | 0;
+        let t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+
+    const gridX = c => -1 + (c + 0.5) * 2 / G;
+    const gridY = r => 1 - (r + 0.5) * 2 / G;
+
+    // ---------- Data generation ----------
+    function computeTruth() {
+      const s = DATASETS[state.key].s;
+      for (let r = 0; r < G; r++) {
+        const y = gridY(r);
+        for (let c = 0; c < G; c++) truth[r * G + c] = s(gridX(c), y) > 0 ? 1 : 0;
+      }
+    }
+
+    function sampleSets() {
+      const ds = DATASETS[state.key];
+      const rnd = mulberry32(state.seed * 7919 + 13);
+      const gauss = () => Math.sqrt(-2 * Math.log(1 - rnd())) * Math.cos(2 * Math.PI * rnd());
+      sets = [];
+      for (let m = 0; m < state.M; m++) {
+        const x = new Float64Array(state.N), y = new Float64Array(state.N), lab = new Uint8Array(state.N);
+        for (let i = 0; i < state.N; i++) {
+          if (ds.kind === 'uniform') {
+            let px, py;
+            do { px = rnd() * 2 - 1; py = rnd() * 2 - 1; } while (Math.abs(ds.s(px, py)) < ds.gap / 2);
+            x[i] = px; y[i] = py; lab[i] = ds.s(px, py) > 0 ? 1 : 0;
+          } else {
+            const cls = rnd() < 0.5 ? 0 : 1;
+            const c = cls ? ds.c1 : ds.c0;
+            x[i] = c[0] + ds.sigma * gauss();
+            y[i] = c[1] + ds.sigma * gauss();
+            lab[i] = cls;
+          }
+          if (state.noise > 0 && rnd() < state.noise) lab[i] = 1 - lab[i];
+        }
+        sets.push({ x, y, lab });
+      }
+    }
+
+    // Marching squares on the signed function to get a smooth true boundary.
+    function computeContour() {
+      const R = 160, s = DATASETS[state.key].s;
+      const vals = new Float64Array((R + 1) * (R + 1));
+      for (let i = 0; i <= R; i++) {
+        const y = 1 - 2 * i / R;
+        for (let j = 0; j <= R; j++) vals[i * (R + 1) + j] = s(-1 + 2 * j / R, y);
+      }
+      const segs = [];
+      const scale = SIZE / R;
+      const lerp = (a, b) => { const t = a / (a - b); return isFinite(t) ? Math.min(1, Math.max(0, t)) : 0.5; };
+      const TABLE = [null, [[3, 2]], [[2, 1]], [[3, 1]], [[0, 1]], [[0, 3], [2, 1]], [[0, 2]], [[0, 3]],
+                     [[0, 3]], [[0, 2]], [[0, 1], [3, 2]], [[0, 1]], [[3, 1]], [[2, 1]], [[3, 2]], null];
+      for (let i = 0; i < R; i++) {
+        for (let j = 0; j < R; j++) {
+          const a = vals[i * (R + 1) + j], b = vals[i * (R + 1) + j + 1];
+          const c = vals[(i + 1) * (R + 1) + j + 1], d = vals[(i + 1) * (R + 1) + j];
+          const idx = ((a > 0) << 3) | ((b > 0) << 2) | ((c > 0) << 1) | (d > 0);
+          const entries = TABLE[idx];
+          if (!entries) continue;
+          const pts = [[j + lerp(a, b), i], [j + 1, i + lerp(b, c)], [j + lerp(d, c), i + 1], [j, i + lerp(a, d)]];
+          for (const [e1, e2] of entries) {
+            segs.push([pts[e1][0] * scale, pts[e1][1] * scale, pts[e2][0] * scale, pts[e2][1] * scale]);
+          }
+        }
+      }
+      contour = segs;
+    }
+
+    // ---------- Bias / variance computation ----------
+    function startCompute() {
+      ready = false;
+      const token = ++computeToken;
+      const N = state.N, M = state.M;
+      preds = new Uint8Array(M * P * GG);
+      svFlags = MODEL.usesSV ? new Uint8Array(M * P * N) : null;
+      counts = new Uint16Array(P * GG);
+      let m = 0;
+      statusDiv.textContent = 'Fitting models… 0/' + M + ' training sets';
+      drawChart();
+      function step() {
+        if (token !== computeToken) return;
+        const t0 = performance.now();
+        while (m < M && performance.now() - t0 < 60) {
+          MODEL.fitSet(sets[m], m, preds, svFlags);
+          const base = m * P * GG;
+          for (let i = 0; i < P * GG; i++) counts[i] += preds[base + i];
+          m++;
+        }
+        if (m < M) {
+          statusDiv.textContent = 'Fitting models… ' + m + '/' + M + ' training sets';
+          setTimeout(step, 0);
+        } else {
+          finishCompute();
+        }
+      }
+      setTimeout(step, 0);
+    }
+
+    function finishCompute() {
+      const M = state.M;
+      curves = { bias2: new Float64Array(P), vari: new Float64Array(P), err: new Float64Array(P) };
+      for (let pi = 0; pi < P; pi++) {
+        const base = pi * GG;
+        let sb = 0, sv = 0;
+        for (let g = 0; g < GG; g++) {
+          const p = counts[base + g] / M;
+          const d = p - truth[g];
+          sb += d * d;
+          sv += p * (1 - p);
+        }
+        curves.bias2[pi] = sb / GG;
+        curves.vari[pi] = sv / GG;
+        curves.err[pi] = (sb + sv) / GG;
+      }
+      ready = true;
+      statusDiv.textContent = '';
+      redrawAll();
+    }
+
+    // ---------- Rendering ----------
+    const off = document.createElement('canvas');
+    off.width = G; off.height = G;
+    const offCtx = off.getContext('2d');
+    const img = offCtx.createImageData(G, G);
+
+    function blit(canvas) {
+      offCtx.putImageData(img, 0, 0);
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, SIZE, SIZE);
+      ctx.drawImage(off, 0, 0, SIZE, SIZE);
+    }
+
+    function drawContour(canvas) {
+      const ctx = canvas.getContext('2d');
+      ctx.strokeStyle = '#222';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (const [x1, y1, x2, y2] of contour) { ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); }
+      ctx.stroke();
+    }
+
+    function setPixel(i, rgb) {
+      img.data[i * 4] = rgb[0]; img.data[i * 4 + 1] = rgb[1]; img.data[i * 4 + 2] = rgb[2]; img.data[i * 4 + 3] = 255;
+    }
+
+    function heat(i, t, col) {   // white -> col as t goes 0 -> 1
+      t = Math.min(1, Math.max(0, t));
+      img.data[i * 4] = 255 + (col[0] - 255) * t;
+      img.data[i * 4 + 1] = 255 + (col[1] - 255) * t;
+      img.data[i * 4 + 2] = 255 + (col[2] - 255) * t;
+      img.data[i * 4 + 3] = 255;
+    }
+
+    function drawPoints(set) {
+      const ctx = regionCanvas.getContext('2d');
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#222';
+      for (let i = 0; i < state.N; i++) {
+        const px = (set.x[i] + 1) / 2 * SIZE, py = (1 - set.y[i]) / 2 * SIZE;
+        const col = set.lab[i] ? C1 : C0;
+        ctx.fillStyle = 'rgb(' + col[0] + ',' + col[1] + ',' + col[2] + ')';
+        ctx.beginPath();
+        ctx.arc(px, py, 3.5, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
+    function drawRegion() {
+      const set = sets[state.dsIdx];
+      dsIdxSpan.textContent = state.dsIdx + 1;
+      dsTotalSpan.textContent = state.M;
+      if (!ready) {
+        for (let g = 0; g < GG; g++) setPixel(g, [255, 255, 255]);
+        blit(regionCanvas);
+        drawContour(regionCanvas);
+        drawPoints(set);
+        return;
+      }
+      const base = (state.dsIdx * P + state.pi) * GG;
+      for (let g = 0; g < GG; g++) setPixel(g, preds[base + g] ? C1_LIGHT : C0_LIGHT);
+      blit(regionCanvas);
+      drawContour(regionCanvas);
+      drawPoints(set);
+      if (svFlags) {
+        const ctx = regionCanvas.getContext('2d');
+        const sbase = (state.dsIdx * P + state.pi) * state.N;
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#111';
+        let nsv = 0;
+        for (let i = 0; i < state.N; i++) {
+          if (!svFlags[sbase + i]) continue;
+          nsv++;
+          const px = (set.x[i] + 1) / 2 * SIZE, py = (1 - set.y[i]) / 2 * SIZE;
+          ctx.beginPath();
+          ctx.arc(px, py, 6.5, 0, 2 * Math.PI);
+          ctx.stroke();
+        }
+        $('svCount').textContent = nsv;
+      }
+    }
+
+    function drawMaps() {
+      const base = state.pi * GG, M = state.M;
+      for (let g = 0; g < GG; g++) {
+        const p = counts[base + g] / M, d = p - truth[g];
+        heat(g, d * d, BIAS_COL);
+      }
+      blit(biasCanvas);
+      drawContour(biasCanvas);
+      for (let g = 0; g < GG; g++) {
+        const p = counts[base + g] / M;
+        heat(g, p * (1 - p) / 0.25, VAR_COL);
+      }
+      blit(varCanvas);
+      drawContour(varCanvas);
+    }
+
+    function fmtParam(v) {
+      return (v >= 1e-3 && v < 1e4) ? String(+v.toPrecision(2)) : v.toExponential(1);
+    }
+
+    function argminErr() {
+      let best = 0;
+      for (let j = 1; j < P; j++) if (curves.err[j] < curves.err[best]) best = j;
+      return best;
+    }
+
+    function drawInfo() {
+      const i = state.pi;
+      biasVal.textContent = curves.bias2[i].toFixed(4);
+      varVal.textContent = curves.vari[i].toFixed(4);
+      errVal.textContent = curves.err[i].toFixed(4);
+      const best = argminErr();
+      minInfo.textContent = '(minimum total error ' + curves.err[best].toFixed(4) + ' at ' + MODEL.symbol + ' = ' + fmtParam(MODEL.params[best]) + ')';
+    }
+
+    function chartGeom() {
+      const W = chart.width, H = chart.height;
+      const L = 60, R = 20, T = 42, B = 45;
+      return { W, H, L, R, T, B, pw: W - L - R, ph: H - T - B };
+    }
+
+    const xOfI = (i, gm) => gm.L + i / (P - 1) * gm.pw;
+    const iOfX = (x, gm) => Math.min(P - 1, Math.max(0, Math.round((x - gm.L) / gm.pw * (P - 1))));
+
+    function drawChart() {
+      const ctx = chart.getContext('2d');
+      const gm = chartGeom();
+      ctx.clearRect(0, 0, gm.W, gm.H);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, gm.W, gm.H);
+      ctx.font = '12px Arial';
+      ctx.fillStyle = '#333';
+      if (!ready) {
+        ctx.textAlign = 'center';
+        ctx.fillText('Computing…', gm.W / 2, gm.H / 2);
+        return;
+      }
+      let yMax = 0;
+      for (let i = 0; i < P; i++) yMax = Math.max(yMax, curves.err[i]);
+      yMax = Math.max(yMax * 1.08, 0.02);
+      const yOf = v => gm.T + gm.ph - v / yMax * gm.ph;
+
+      // Y grid + ticks
+      const yStep = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2].find(s => yMax / s <= 7) || 0.2;
+      ctx.strokeStyle = '#eee';
+      ctx.lineWidth = 1;
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      for (let v = 0; v <= yMax + 1e-12; v += yStep) {
+        const y = yOf(v);
+        ctx.beginPath(); ctx.moveTo(gm.L, y); ctx.lineTo(gm.L + gm.pw, y); ctx.stroke();
+        ctx.fillText(v.toFixed(yStep < 0.01 ? 3 : 2), gm.L - 6, y);
+      }
+      // X ticks at integer decades
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      for (let i = 0; i < P; i++) {
+        const e = Math.log10(MODEL.params[i]);
+        if (Math.abs(e - Math.round(e)) > 1e-6) continue;
+        const x = xOfI(i, gm);
+        ctx.beginPath(); ctx.moveTo(x, gm.T); ctx.lineTo(x, gm.T + gm.ph); ctx.stroke();
+        ctx.fillText('1e' + Math.round(e), x, gm.T + gm.ph + 5);
+      }
+      // Axes
+      ctx.strokeStyle = '#888';
+      ctx.beginPath();
+      ctx.moveTo(gm.L, gm.T); ctx.lineTo(gm.L, gm.T + gm.ph); ctx.lineTo(gm.L + gm.pw, gm.T + gm.ph);
+      ctx.stroke();
+      ctx.fillStyle = '#333';
+      ctx.fillText(MODEL.axisLabel, gm.L + gm.pw / 2, gm.T + gm.ph + 22);
+      ctx.save();
+      ctx.translate(14, gm.T + gm.ph / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textBaseline = 'middle';
+      ctx.fillText('error (averaged over grid)', 0, 0);
+      ctx.restore();
+
+      // Curves
+      const series = [
+        { data: curves.bias2, col: 'rgb(' + BIAS_COL.join(',') + ')', w: 2, name: 'Bias²' },
+        { data: curves.vari, col: 'rgb(' + VAR_COL.join(',') + ')', w: 2, name: 'Variance' },
+        { data: curves.err, col: '#222', w: 2.5, name: 'Total error = Bias² + Variance' }
+      ];
+      for (const s of series) {
+        ctx.strokeStyle = s.col;
+        ctx.lineWidth = s.w;
+        ctx.beginPath();
+        for (let i = 0; i < P; i++) {
+          const x = xOfI(i, gm), y = yOf(s.data[i]);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+      // Minimum marker
+      const best = argminErr();
+      const bx = xOfI(best, gm), by = yOf(curves.err[best]);
+      ctx.fillStyle = '#222';
+      ctx.beginPath();
+      ctx.moveTo(bx, by + 6); ctx.lineTo(bx - 5, by + 14); ctx.lineTo(bx + 5, by + 14); ctx.closePath();
+      ctx.fill();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText('min @ ' + MODEL.symbol + '=' + fmtParam(MODEL.params[best]), Math.min(gm.L + gm.pw - 40, Math.max(gm.L + 40, bx)), by + 16);
+
+      // Current parameter marker
+      const cx = xOfI(state.pi, gm);
+      ctx.strokeStyle = '#c00';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(cx, gm.T); ctx.lineTo(cx, gm.T + gm.ph); ctx.stroke();
+      ctx.setLineDash([]);
+      for (const s of series) {
+        ctx.fillStyle = s.col;
+        ctx.beginPath();
+        ctx.arc(cx, yOf(s.data[state.pi]), 4, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#c00';
+      const right = cx > gm.L + gm.pw - 90;
+      ctx.textAlign = right ? 'right' : 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(MODEL.symbol + ' = ' + fmtParam(MODEL.params[state.pi]), cx + (right ? -5 : 5), gm.T + 2);
+
+      // Legend (header row above the plot area)
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      let lx = gm.L, ly = gm.T / 2;
+      for (const s of series) {
+        ctx.strokeStyle = s.col; ctx.lineWidth = s.w;
+        ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx + 22, ly); ctx.stroke();
+        ctx.fillStyle = '#333';
+        ctx.fillText(s.name, lx + 28, ly);
+        lx += 28 + ctx.measureText(s.name).width + 30;
+      }
+    }
+
+    function redrawAll() {
+      if (!ready) return;
+      drawRegion();
+      drawMaps();
+      drawInfo();
+      drawChart();
+    }
+
+    // ---------- Regeneration pipeline ----------
+    function regenerate() {
+      state.key = datasetSelect.value;
+      state.N = +nSelect.value;
+      state.M = +mSelect.value;
+      state.noise = +noiseSelect.value;
+      state.dsIdx = Math.min(state.dsIdx, state.M - 1);
+      dsTotalSpan.textContent = state.M;
+      pValue.textContent = fmtParam(MODEL.params[state.pi]);
+      MODEL.readOptions();
+      computeTruth();
+      computeContour();
+      sampleSets();
+      MODEL.prepare();
+      drawRegion();
+      startCompute();
+    }
+
+    // ---------- Events ----------
+    datasetSelect.addEventListener('change', regenerate);
+    nSelect.addEventListener('change', regenerate);
+    mSelect.addEventListener('change', regenerate);
+    noiseSelect.addEventListener('change', regenerate);
+    for (const id of MODEL.optionIds) $(id).addEventListener('change', regenerate);
+    regenBtn.addEventListener('click', () => { state.seed++; regenerate(); });
+
+    function setParamIndex(i) {
+      i = Math.min(P - 1, Math.max(0, i | 0));
+      if (i === state.pi) return;
+      state.pi = i;
+      pSlider.value = i;
+      pValue.textContent = fmtParam(MODEL.params[i]);
+      redrawAll();
+    }
+    pSlider.addEventListener('input', () => setParamIndex(+pSlider.value));
+
+    prevDs.addEventListener('click', () => { state.dsIdx = (state.dsIdx - 1 + state.M) % state.M; drawRegion(); });
+    nextDs.addEventListener('click', () => { state.dsIdx = (state.dsIdx + 1) % state.M; drawRegion(); });
+
+    let chartDrag = false;
+    function chartPointer(e) {
+      const rect = chart.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * chart.width / rect.width;
+      setParamIndex(iOfX(x, chartGeom()));
+    }
+    chart.addEventListener('pointerdown', e => { chartDrag = true; chart.setPointerCapture(e.pointerId); chartPointer(e); });
+    chart.addEventListener('pointermove', e => { if (chartDrag) chartPointer(e); });
+    chart.addEventListener('pointerup', () => { chartDrag = false; });
+    chart.addEventListener('pointercancel', () => { chartDrag = false; });
+
+    // ---------- Go ----------
+    window.bvDemo = { state, get curves() { return curves; }, get ready() { return ready; }, params: MODEL.params };
+    regenerate();
+  })();
+  </script>
+</body>
+</html>
